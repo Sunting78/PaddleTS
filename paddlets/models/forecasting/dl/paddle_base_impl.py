@@ -20,7 +20,7 @@ from paddlets.models.common.callbacks import (
 from paddlets.metrics import (MetricContainer, Metric)
 from paddlets.models.forecasting.dl.paddle_base import PaddleBaseModel
 from paddlets.models.data_adapter import DataAdapter
-from paddlets.models.utils import to_tsdataset, check_tsdataset
+from paddlets.models.utils import to_tsdataset, check_tsdataset, build_network_input_spec
 from paddlets.datasets import TSDataset
 from paddlets.logger import raise_if, Logger
 
@@ -92,7 +92,8 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
             max_epochs: int=10,
             verbose: int=1,
             patience: int=4,
-            seed: Optional[int]=None, ):
+            seed: Optional[int]=None, 
+            ):
         super(PaddleBaseModelImpl, self).__init__(
             in_chunk_len=in_chunk_len,
             out_chunk_len=out_chunk_len,
@@ -324,9 +325,20 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         callback_container.set_trainer(self)
         return history, callback_container
 
+    def apply_to_static(self, model):
+        specs = None
+        meta_data = self._build_meta()
+        spec = build_network_input_spec(meta_data)
+        model = paddle.jit.to_static(model, input_spec=spec)
+        logger.info("Successfully to apply @to_static with specs: {}".format(spec))
+        return model
+    
     def fit(self,
             train_tsdataset: Union[TSDataset, List[TSDataset]],
-            valid_tsdataset: Optional[Union[TSDataset, List[TSDataset]]]=None):
+            valid_tsdataset: Optional[Union[TSDataset, List[TSDataset]]]=None,
+            to_static_train: bool=False,
+            use_amp: bool=False,
+            amp_level: str='O2'):
         """Train a neural network stored in self._network, 
             Using train_dataloader for training data and valid_dataloader for validation.
 
@@ -334,6 +346,8 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
             train_tsdataset(Union[TSDataset, List[TSDataset]]): Train set. 
             valid_tsdataset(Optional[Union[TSDataset, List[TSDataset]]]): Eval set, used for early stopping.
         """
+        self.use_amp = use_amp
+        self.amp_level = amp_level
         if isinstance(train_tsdataset, TSDataset):
             train_tsdataset = [train_tsdataset]
         if isinstance(valid_tsdataset, TSDataset):
@@ -346,11 +360,12 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
             self._check_multi_tsdataset(valid_tsdataset)
         train_dataloader, valid_dataloaders = self._init_fit_dataloaders(
             train_tsdataset, valid_tsdataset)
-        self._fit(train_dataloader, valid_dataloaders)
+        self._fit(train_dataloader, valid_dataloaders, to_static_train)
 
     def _fit(self,
              train_dataloader: paddle.io.DataLoader,
-             valid_dataloaders: List[paddle.io.DataLoader]=None):
+             valid_dataloaders: List[paddle.io.DataLoader]=None,
+             to_static_train: bool=False):
         """Fit function core logic. 
 
         Args: 
@@ -360,10 +375,22 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         valid_names = [f"val_{k}" for k in range(len(valid_dataloaders))]
         self._metrics, self._metrics_names, \
             self._metric_container_dict =  self._init_metrics(valid_names)
-        self._history, self._callback_container = self._init_callbacks()
+        
         self._network = self._init_network()
         self._optimizer = self._init_optimizer()
 
+        if self.use_amp :
+            logger.info('use AMP to train. AMP level = {}'.format(self.amp_level))
+            self.scaler = paddle.amp.GradScaler(init_loss_scaling=1024)
+            if self.amp_level == 'O2':
+                self._network, self._optimizer = paddle.amp.decorate(
+                                                    models=self._network,
+                                                    optimizers=self._optimizer,
+                                                    level='O2')
+        if to_static_train:
+            self._network = self.apply_to_static(self._network)
+        
+        self._history, self._callback_container = self._init_callbacks()
         # Call the `on_train_begin` method of each callback before the training starts.
         self._callback_container.on_train_begin({"start_time": time.time()})
         #learning_rate = self._optimizer_params['learning_rate']
@@ -422,10 +449,24 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         list_y_true = []
         for batch_nb, data in enumerate(dataloader):
             X, y = self._prepare_X_y(data)
-            output = self._network(X)
-            predictions = output.numpy()
-            list_y_score.append(predictions)
-            list_y_true.append(y)
+            if self.use_amp:
+                with paddle.amp.auto_cast(
+                        level=self.amp_level,
+                        enable=True,
+                        custom_white_list={
+                            "elementwise_add", "batch_norm", "sync_batch_norm"
+                        },
+                        custom_black_list={'bilinear_interp_v2'}):
+                    output = self._network(X)
+                    predictions = output.numpy()
+                    list_y_score.append(predictions)
+                    list_y_true.append(y)
+
+            else:
+                output = self._network(X)
+                predictions = output.numpy()
+                list_y_score.append(predictions)
+                list_y_true.append(y)
         y_true, scores = np.vstack(list_y_true), np.vstack(list_y_score)
         return y_true, scores
 
@@ -442,9 +483,21 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         results = []
         for batch_nb, data in enumerate(dataloader):
             X, _ = self._prepare_X_y(data)
-            output = self._network(X)
-            predictions = output.numpy()
-            results.append(predictions)
+            if self.use_amp:
+                with paddle.amp.auto_cast(
+                        level=self.amp_level,
+                        enable=True,
+                        custom_white_list={
+                            "elementwise_add", "batch_norm", "sync_batch_norm"
+                        },
+                        custom_black_list={'bilinear_interp_v2'}):
+                    output = self._network(X)
+                    predictions = output.numpy()
+                    results.append(predictions)
+            else:
+                output = self._network(X)
+                predictions = output.numpy()
+                results.append(predictions)
         results = np.vstack(results)
         return results
 
@@ -487,18 +540,41 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         Returns:
             Dict[str, Any]: Dict of logs.
         """
-        start_time = time.time()
-        output = self._network(X)
-        train_run_cost = time.time() - start_time
-        loss = self._compute_loss(output, y)
-        loss.backward()
-        self._optimizer.step()
-        self._optimizer.clear_grad()
-        batch_logs = {
-            "batch_size": y.shape[0],
-            "loss": loss.item(),
-            "train_run_cost": train_run_cost
-        }
+        if self.use_amp:
+            with paddle.amp.auto_cast(
+                    level=self.amp_level,
+                    enable=True,
+                    custom_white_list={
+                        "elementwise_add", "batch_norm", "sync_batch_norm"
+                    },
+                    custom_black_list={'bilinear_interp_v2'}):
+                start_time = time.time()
+                output = self._network(X)
+                train_run_cost = time.time() - start_time
+                loss = self._compute_loss(output, y)
+                scaled_loss = self.scaler.scale(loss) 
+                scaled_loss.backward()
+                self.scaler.step(self._optimizer)  # update parameters
+                self.scaler.update()
+                self._optimizer.clear_grad()
+                batch_logs = {
+                    "batch_size": y.shape[0],
+                    "loss": scaled_loss.item(),
+                    "train_run_cost": train_run_cost
+                }
+        else:
+            start_time = time.time()
+            output = self._network(X)
+            train_run_cost = time.time() - start_time
+            loss = self._compute_loss(output, y)
+            loss.backward()
+            self._optimizer.step()
+            self._optimizer.clear_grad()
+            batch_logs = {
+                "batch_size": y.shape[0],
+                "loss": loss.item(),
+                "train_run_cost": train_run_cost
+            }
         return batch_logs
 
     def _predict_epoch(self, name: str, loader: paddle.io.DataLoader):
@@ -529,7 +605,17 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
         Returns:
             np.ndarray: Prediction results.
         """
-        scores = self._network(X)
+        if self.use_amp:
+            with paddle.amp.auto_cast(
+                    level=self.amp_level,
+                    enable=True,
+                    custom_white_list={
+                        "elementwise_add", "batch_norm", "sync_batch_norm"
+                    },
+                    custom_black_list={'bilinear_interp_v2'}):
+                scores = self._network(X)
+        else:
+            scores = self._network(X)
         return scores.numpy()
 
     def _prepare_X_y(self, X: Dict[str, paddle.Tensor]) -> Tuple[Dict[
@@ -594,9 +680,10 @@ class PaddleBaseModelImpl(PaddleBaseModel, abc.ABC):
 
     def _build_meta(self):
         res = super()._build_meta()
-        for key, value in self._fit_params.items():
-            if not isinstance(value, int):
-                continue
-            if value != 0:
-                res['input_data'][key] = value
+        if self._fit_params is not None:
+            for key, value in self._fit_params.items():
+                if not isinstance(value, int):
+                    continue
+                if value != 0:
+                    res['input_data'][key] = value
         return res

@@ -255,6 +255,9 @@ class PaddleBaseModel(BaseModel, metaclass=abc.ABCMeta):
         network = self._network
         callback_container = self._callback_container
         loss_fn = self._loss_fn
+        if self.use_amp:
+            scaler = self.scaler
+            self.scaler = None
 
         # _network is inherited from a paddle-related pickle-not-serializable object, so needs to set to None.
         self._network = None
@@ -280,6 +283,8 @@ class PaddleBaseModel(BaseModel, metaclass=abc.ABCMeta):
         self._network = network
         self._callback_container = callback_container
         self._loss_fn = loss_fn
+        if self.use_amp:
+            self.scaler = scaler
 
         return
 

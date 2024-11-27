@@ -329,7 +329,10 @@ class TimesNet_AD(AnomalyBaseModel):
 
     def fit(self,
             train_tsdataset: TSDataset,
-            valid_tsdataset: Optional[TSDataset]=None):
+            valid_tsdataset: Optional[TSDataset]=None,
+            to_static_train: bool=False,
+            use_amp: bool=False,
+            amp_level="O2"):
         """Train a neural network stored in self._network, 
             Using train_dataloader for training data and valid_dataloader for validation.
 
@@ -337,6 +340,8 @@ class TimesNet_AD(AnomalyBaseModel):
             train_tsdataset(TSDataset): Train set. 
             valid_tsdataset(TSDataset|None): Eval set, used for early stopping.
         """
+        self.use_amp = use_amp
+        self.amp_level = amp_level
         self._check_tsdataset(train_tsdataset)
         if valid_tsdataset is not None:
             self._check_tsdataset(valid_tsdataset)
@@ -344,7 +349,7 @@ class TimesNet_AD(AnomalyBaseModel):
                                                    valid_tsdataset)
         train_dataloader, valid_dataloaders = self._init_fit_dataloaders(
             train_tsdataset, valid_tsdataset)
-        self._fit(train_dataloader, valid_dataloaders)
+        self._fit(train_dataloader, valid_dataloaders, to_static_train)
 
         # Get threshold
         if self._threshold is None:
@@ -387,12 +392,27 @@ class TimesNet_AD(AnomalyBaseModel):
         raise_if(train_dataloader is None,
                  f" Please pass in train_tsdataset to calculate the threshold.")
         logger.info(f"calculate threshold...")
-        self._threshold = self._threshold_fn(
-            self._network,
-            train_dataloader,
-            val_dataloader,
-            anomaly_ratio=self._anomaly_ratio,
-            criterion=self._criterion)
+        if self.use_amp:
+            with paddle.amp.auto_cast(
+                                level=self.amp_level,
+                                enable=True,
+                                custom_white_list={
+                                    "elementwise_add", "batch_norm", "sync_batch_norm"
+                                },
+                                custom_black_list={'bilinear_interp_v2'}):
+                self._threshold = self._threshold_fn(
+                    self._network,
+                    train_dataloader,
+                    val_dataloader,
+                    anomaly_ratio=self._anomaly_ratio,
+                    criterion=self._criterion)
+        else:
+            self._threshold = self._threshold_fn(
+                self._network,
+                train_dataloader,
+                val_dataloader,
+                anomaly_ratio=self._anomaly_ratio,
+                criterion=self._criterion)
         logger.info(f"threshold is {self._threshold}")
         return self._threshold
 
@@ -434,7 +454,18 @@ class TimesNet_AD(AnomalyBaseModel):
         test_labels = []
 
         for _, data in enumerate(dataloader):
-            y_pred, y_true = self._network(data)
+            if self.use_amp:
+                with paddle.amp.auto_cast(
+                        level=self.amp_level,
+                        enable=True,
+                        custom_white_list={
+                            "elementwise_add", "batch_norm",
+                            "sync_batch_norm"
+                        },
+                        custom_black_list={'bilinear_interp_v2'}):
+                    y_pred, y_true = self._network(data)
+            else:
+                y_pred, y_true = self._network(data)
             loss = self._get_loss(y_pred, y_true)
             attens_energy.append(loss)
             test_labels.append(data['past_target'])

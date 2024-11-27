@@ -351,7 +351,6 @@ class TimeFeatureGenerator(BaseTransform):
                 for i, H in enumerate(HOLIDAYS):
                     v = tf_kcov[time_col].apply(_distance_to_holiday(H))
                     v.index = tf_kcov[time_col]
-                    #import pdb;pdb.set_trace()
                     holidays_col.append(k + '_' + str(i))
                     new_ts.set_column(k + '_' + str(i), v, 'known_cov')
                 scaler = StandardScaler(cols=holidays_col)

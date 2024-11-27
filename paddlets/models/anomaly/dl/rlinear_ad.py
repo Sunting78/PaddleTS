@@ -232,7 +232,8 @@ class RLinear_AD(AnomalyBaseModel):
 
     def fit(self,
             train_tsdataset: TSDataset,
-            valid_tsdataset: Optional[TSDataset]=None):
+            valid_tsdataset: Optional[TSDataset]=None,
+            to_static_train: bool=False):
         """Train a neural network stored in self._network, 
             Using train_dataloader for training data and valid_dataloader for validation.
 
@@ -247,7 +248,7 @@ class RLinear_AD(AnomalyBaseModel):
                                                    valid_tsdataset)
         train_dataloader, valid_dataloaders = self._init_fit_dataloaders(
             train_tsdataset, valid_tsdataset)
-        self._fit(train_dataloader, valid_dataloaders)
+        self._fit(train_dataloader, valid_dataloaders, to_static_train)
 
         # Get threshold
         if self._threshold is None:

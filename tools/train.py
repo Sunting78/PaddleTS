@@ -88,7 +88,7 @@ def main(args):
 
     print_mem_info = cfg.dic.get('print_mem_info', True)
     set_print_mem_info(print_mem_info)
-    log_interval = cfg.dic.get('log_interval', 1)
+    log_interval = cfg.dic.get('log_interval', 100)
     set_log_interval(log_interval)
     batch_size = cfg.batch_size
     dataset = cfg.dataset
@@ -344,10 +344,13 @@ def main(args):
             if ts_test is not None:
                 ts_test = time_feature_generator.fit_transform(ts_test)
     score = 0.0
-    if cfg.task == 'longforecast':
 
+    to_static_train = cfg.dic.get('to_static_train', False)
+    use_amp = cfg.dic.get('use_amp', False)
+    amp_level = cfg.dic.get('amp_level', 'O2')
+    if cfg.task == 'longforecast':
         logger.info('start training...')
-        model.fit(ts_train, ts_val)
+        model.fit(ts_train, ts_val, to_static_train=to_static_train, use_amp=use_amp, amp_level=amp_level)
 
         logger.info('search best model...')
         if cfg.model['name'] == 'PP-TS' and ts_val is not None:
@@ -381,14 +384,14 @@ def main(args):
                 dataset.static_cov = None
             ts_val_y = np.array(y_label)
 
-        model.fit(ts_train, ts_y, ts_val, ts_val_y)
+        model.fit(ts_train, ts_y, ts_val, ts_val_y, to_static_train=to_static_train, use_amp=use_amp, amp_level=amp_level)
         model.save(cfg_output_dir + '/checkpoints/')
         if ts_val is not None:
             from sklearn.metrics import accuracy_score, f1_score
             preds = model.predict_proba(ts_val)
             score = accuracy_score(ts_val_y, np.argmax(preds, axis=1))
     elif cfg.task == 'anomaly':
-        model.fit(ts_train, ts_val)
+        model.fit(ts_train, ts_val, to_static_train=to_static_train, use_amp=use_amp, amp_level=amp_level)
         if ts_val is not None:
             score = model.eval(ts_val)['f1']
         model.save(cfg_output_dir + '/checkpoints/')

@@ -369,9 +369,20 @@ class AnomalyBaseModel(abc.ABC):
         callback_container.set_trainer(self)
         return history, callback_container
 
+    def apply_to_static(self, model):
+        specs = None
+        meta_data = self._build_meta()
+        spec = build_network_input_spec(meta_data)
+        model = paddle.jit.to_static(model, input_spec=spec)
+        logger.info("Successfully to apply @to_static with specs: {}".format(spec))
+        return model
+    
     def fit(self,
             train_tsdataset: TSDataset,
-            valid_tsdataset: Optional[TSDataset]=None):
+            valid_tsdataset: Optional[TSDataset]=None,
+            to_static_train: bool=False,
+            use_amp: bool=False,
+            amp_level: str='O2'):
         """Train a neural network stored in self._network, 
             Using train_dataloader for training data and valid_dataloader for validation.
 
@@ -379,6 +390,8 @@ class AnomalyBaseModel(abc.ABC):
             train_tsdataset(TSDataset): Train set. 
             valid_tsdataset(TSDataset|None): Eval set, used for early stopping.
         """
+        self.use_amp = use_amp
+        self.amp_level = amp_level
         self._check_tsdataset(train_tsdataset)
         if valid_tsdataset is not None:
             self._check_tsdataset(valid_tsdataset)
@@ -386,7 +399,7 @@ class AnomalyBaseModel(abc.ABC):
                                                    valid_tsdataset)
         train_dataloader, valid_dataloaders = self._init_fit_dataloaders(
             train_tsdataset, valid_tsdataset)
-        self._fit(train_dataloader, valid_dataloaders)
+        self._fit(train_dataloader, valid_dataloaders, to_static_train)
 
         # Get threshold
         if self._threshold is None:
@@ -398,7 +411,8 @@ class AnomalyBaseModel(abc.ABC):
 
     def _fit(self,
              train_dataloader: paddle.io.DataLoader,
-             valid_dataloaders: List[paddle.io.DataLoader]=None):
+             valid_dataloaders: List[paddle.io.DataLoader]=None,
+             to_static_train: bool=False):
         """Fit function core logic. 
 
         Args: 
@@ -411,6 +425,16 @@ class AnomalyBaseModel(abc.ABC):
         self._history, self._callback_container = self._init_callbacks()
         self._network = self._init_network()
         self._optimizer = self._init_optimizer()
+        if self.use_amp:
+            logger.info('use AMP to train. AMP level = {}'.format(self.amp_level))
+            self.scaler = paddle.amp.GradScaler(init_loss_scaling=1024)
+            if self.amp_level == 'O2':
+                self._network, self._optimizer = paddle.amp.decorate(
+                                                    models=self._network,
+                                                    optimizers=self._optimizer,
+                                                    level='O2')
+        if to_static_train:
+            self._network = self.apply_to_static(self._network)
 
         # Call the `on_train_begin` method of each callback before the training starts.
         self._callback_container.on_train_begin({"start_time": time.time()})
@@ -476,7 +500,18 @@ class AnomalyBaseModel(abc.ABC):
         test_labels = []
 
         for _, data in enumerate(dataloader):
-            y_pred, y_true = self._network(data)
+            if self.use_amp:
+                with paddle.amp.auto_cast(
+                        level=self.amp_level,
+                        enable=True,
+                        custom_white_list={
+                            "elementwise_add", "batch_norm", "sync_batch_norm"
+                        },
+                        custom_black_list={'bilinear_interp_v2'}):
+                
+                    y_pred, y_true = self._network(data)
+            else:
+                y_pred, y_true = self._network(data)
             loss = self._get_loss_eval(y_pred, y_true)
             attens_energy.append(loss)
             test_labels.append(data['past_target'])
@@ -580,10 +615,19 @@ class AnomalyBaseModel(abc.ABC):
         self._network.eval()
         loss_list = []
         for _, data in enumerate(dataloader):
-            y_pred, y_true = self._network(data)
+            if self.use_amp:
+                with paddle.amp.auto_cast(
+                        level=self.amp_level,
+                        enable=True,
+                        custom_white_list={
+                            "elementwise_add", "batch_norm", "sync_batch_norm"
+                        },
+                        custom_black_list={'bilinear_interp_v2'}):
+                    y_pred, y_true = self._network(data)
+            else:
+                y_pred, y_true = self._network(data)
             loss = self._get_loss(y_pred, y_true)
             loss_list.extend(loss)
-
         return np.array(loss_list)
 
     def _get_loss(self, y_pred: paddle.Tensor,
@@ -645,12 +689,30 @@ class AnomalyBaseModel(abc.ABC):
             Dict[str, Any]: Dict of logs.
         """
         start_time = time.time()
-        y_pred, y_true = self._network(X)
-        train_run_cost = time.time() - start_time
-        loss = self._compute_loss(y_pred, y_true)
-        loss.backward()
-        self._optimizer.step()
-        self._optimizer.clear_grad()
+        if self.use_amp:
+            with paddle.amp.auto_cast(
+                    level=self.amp_level,
+                    enable=True,
+                    custom_white_list={
+                        "elementwise_add", "batch_norm", "sync_batch_norm"
+                    },
+                    custom_black_list={'bilinear_interp_v2'}):
+                y_pred, y_true = self._network(X)
+                train_run_cost = time.time() - start_time
+                loss = self._compute_loss(y_pred, y_true)
+                scaled_loss = self.scaler.scale(loss) 
+                scaled_loss.backward()
+                self.scaler.step(self._optimizer)  # update parameters
+                self.scaler.update()
+                self._optimizer.clear_grad()
+
+        else:
+            y_pred, y_true = self._network(X)
+            train_run_cost = time.time() - start_time
+            loss = self._compute_loss(y_pred, y_true)
+            loss.backward()
+            self._optimizer.step()
+            self._optimizer.clear_grad()
         batch_logs = {
             "batch_size": y_true.shape[0],
             "loss": loss.item(),
@@ -686,7 +748,17 @@ class AnomalyBaseModel(abc.ABC):
             y_pred(np.ndarray): Prediction results.
             y_true(np.ndarray): Origin data(features).
         """
-        y_pred, y_true = self._network(X)
+        if self.use_amp:
+            with paddle.amp.auto_cast(
+                    level=self.amp_level,
+                    enable=True,
+                    custom_white_list={
+                        "elementwise_add", "batch_norm", "sync_batch_norm"
+                    },
+                    custom_black_list={'bilinear_interp_v2'}):
+                y_pred, y_true = self._network(X)
+        else:
+            y_pred, y_true = self._network(X)
         return y_pred.numpy(), y_true.numpy()
 
     def _compute_loss(self, y_pred: paddle.Tensor,
@@ -934,6 +1006,9 @@ class AnomalyBaseModel(abc.ABC):
         network = self._network
         callback_container = self._callback_container
         loss_fn = self._loss_fn
+        if self.use_amp:
+            scaler = self.scaler
+            self.scaler = None
 
         # _network is inherited from a paddle-related pickle-not-serializable object, so needs to set to None.
         self._network = None
@@ -959,6 +1034,8 @@ class AnomalyBaseModel(abc.ABC):
         self._network = network
         self._callback_container = callback_container
         self._loss_fn = loss_fn
+        if self.use_amp:
+            scaler = self.scaler
         return
 
     @staticmethod

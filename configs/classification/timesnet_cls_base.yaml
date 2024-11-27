@@ -7,12 +7,16 @@ epoch: 30 # max_epochs
 training: True # 
 eval_metrics:  ['acc', ] 
 task: classification
+to_static_train: False
+use_amp: False
+amp_level: O2
+
 
 dataset: 
   name: TSCLSDataset
-  dataset_root: ./data/
-  train_path: ./data/UWaveGestureLibrary_TRAIN.csv
-  val_path: ./data/UWaveGestureLibrary_TEST.csv
+  dataset_root: dataset/ts_classify_examples
+  train_path: dataset/ts_classify_examples/train.csv
+  val_path: dataset/ts_classify_examples/val.csv
   scale: True
   time_feat: False
 

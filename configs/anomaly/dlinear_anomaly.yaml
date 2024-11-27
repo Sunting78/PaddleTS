@@ -7,21 +7,25 @@ epoch: 1
 training: True 
 anomaly_ratio: 1
 task: anomaly
+to_static_train: False
+use_amp: False
+amp_level: O2
+
 
 
 dataset: 
   name: TSADDataset
-  dataset_root: ../data/
-  train_path: ../data/PMS_train.csv
-  val_path: ../data/PMS_test.csv
+  dataset_root: ./dataset/
+  train_path: ./dataset/ts_anomaly_examples/train.csv
+  val_path: ./dataset/ts_anomaly_examples/test.csv
   scale: True
   time_feat: False
 
 info_params:
   freq: 1
-  time_col: timestamp
-  feature_cols: ['feature_0', 'feature_1', 'feature_2', 'feature_3', 'feature_4', 'feature_5', 'feature_6', 'feature_7', 'feature_8', 'feature_9', 'feature_10', 'feature_11', 'feature_12', 'feature_13', 'feature_14', 'feature_15', 'feature_16', 'feature_17', 'feature_18', 'feature_19', 'feature_20', 'feature_21', 'feature_22', 'feature_23', 'feature_24']
-  label_col: label
+  label_col: "label"
+  feature_cols: ['feature_1', 'feature_2', 'feature_3', 'feature_24']
+
 
 model: 
   name: DLinear_AD
