@@ -831,7 +831,7 @@ class PaddleBaseClassifier(BaseClassifier):
         network = self._network
         callback_container = self._callback_container
         loss_fn = self._loss_fn
-        if self.use_amp:
+        if hasattr(self, 'use_amp') and self.use_amp:
             scaler = self.scaler
             self.scaler = None
 
@@ -859,7 +859,7 @@ class PaddleBaseClassifier(BaseClassifier):
         self._network = network
         self._callback_container = callback_container
         self._loss_fn = loss_fn
-        if self.use_amp:
+        if hasattr(self, 'use_amp') and self.use_amp:
             self.scaler = scaler
         return
 

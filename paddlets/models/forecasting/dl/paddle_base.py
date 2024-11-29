@@ -255,7 +255,7 @@ class PaddleBaseModel(BaseModel, metaclass=abc.ABCMeta):
         network = self._network
         callback_container = self._callback_container
         loss_fn = self._loss_fn
-        if self.use_amp:
+        if hasattr(self, 'use_amp') and self.use_amp:
             scaler = self.scaler
             self.scaler = None
 
@@ -283,7 +283,7 @@ class PaddleBaseModel(BaseModel, metaclass=abc.ABCMeta):
         self._network = network
         self._callback_container = callback_container
         self._loss_fn = loss_fn
-        if self.use_amp:
+        if hasattr(self, 'use_amp') and self.use_amp:
             self.scaler = scaler
 
         return
