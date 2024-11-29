@@ -285,7 +285,6 @@ class PaddleBaseModel(BaseModel, metaclass=abc.ABCMeta):
         self._loss_fn = loss_fn
         if hasattr(self, 'use_amp') and self.use_amp:
             self.scaler = scaler
-
         return
 
     @staticmethod
