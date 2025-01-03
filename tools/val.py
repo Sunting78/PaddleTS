@@ -149,7 +149,6 @@ def main(args):
                     info_params['feature_cols'] = cols
                 if dataset.get('scale', False):
                     scaler_cols = info_params['feature_cols']
-                    scaler.fit(df[scaler_cols])
                     df[scaler_cols] = scaler.transform(df[scaler_cols])  
                 ts_val = TSDataset.load_from_dataframe(df, **info_params)
             elif cfg.task == 'classification':
@@ -168,7 +167,6 @@ def main(args):
                             'target_cols'].split(',')
                 if dataset.get('scale', False):
                     scaler_cols = info_params['target_cols']
-                    scaler.fit(df[scaler_cols])
                     df[scaler_cols] = scaler.transform(df[scaler_cols])
                 ts_val = TSDataset.load_from_dataframe(df, **info_params)
 
